@@ -1,72 +1,57 @@
-import asyncio
 from abc import ABC, abstractmethod
-
+import asyncio
 import aiohttp
 
 from .limits import RateLimit
 
 
-class DownloadManager(ABC):
-    def __init__(self, rate_limits: [RateLimit]):
-        self.rate_limits = rate_limits
+class RequestManager():
+    def __init__(self, headers_and_limits: (dict, (RateLimit,))):
 
         self._loop = asyncio.get_event_loop()
-        self._tasks = asyncio.Queue(loop=self._loop)
-            
+        self._request_queue = asyncio.PriorityQueue(loop=self._loop)
+
+        for headers, limits in headers_and_limits:
+            self._loop.create_task(self._request_handler(headers, limits))
 
     def start(self):
-        try:
-            self._loop.run_until_complete(self._main())
-        except Exception as e:
-            print(f"error: {e}")
-            self._loop.run_until_complete(self._session.close())
-            self._loop.close()
-
-    async def _main(self):
-        self._session = aiohttp.ClientSession()
-
-        await self._prologue()
-
-        while True:
-            task = await self._tasks.get()
-
-            await self._handle_task(task)
-
-        await self._epilogue()
-
-    async def _ensure_rate_limits(self):
-        for limit in self.rate_limits:
-            await limit()
-
-    async def get_json(self, url: str, headers: dict = None):
-        print(f"get_json({url})")
-
-        await self._ensure_rate_limits()
-
-        while True:
-            async with self._session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    return await response.json()
-                elif response.status == 429:
-                    if 'Retry-After' in response.headers:
-                        timeout = float(response.headers['Retry-After'])
-                    else:
-                        timeout = 10.0
-                    print(f"response 429 limited for {timeout} seconds")
-                    await asyncio.sleep(timeout)
-                elif response.status == 403:
-                    raise RuntimeError("access key expired")
-                else:
-                    print(f"response: {response.status} - {response}")
-
-    @abstractmethod
-    async def _prologue(self):
         pass
 
-    @abstractmethod
-    async def _epilogue(self):
-        pass
+
+    async def schedule(
+            self,
+            url: str,
+            callback: asyncio.types.CoroutineType,
+            priority: int = 0):
+        '''Schedule the `url` with the `priority`. The `callback`´
+        will be called with `callback(self, result)`. The `result`
+        is a `aiohttp.ClientResponse`.'''
+        await self._request_queue.put((priority, url, callback))
+
+
+    async def _request_handler(self, headers: dict, limits: (RateLimit,)):
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+
+            while True:
+                # get a new request from the priority queue
+                _, url, callback = await self._request_queue.get()
+
+                response_body = None
+                while response_body is None:
+                    async with session.get(url, headers=headers) as response:
+                        response_body = await self._handle_response(response)
+
+
+                # schedule the callback but don't await the reuslt
+                self._loop.create_task(callback(response_body))
+
+                # ensure the rate limits by awaiting all of them
+                await asyncio.gather(
+                    *(limit() for limit in limits),
+                    loop=self._loop)
 
     @abstractmethod
-    async def _handle_task(self, task):
+    @staticmethod
+    async def _handle_response(response: aiohttp.ClientResponse):
         pass

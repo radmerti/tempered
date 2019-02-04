@@ -2,9 +2,13 @@ import json
 from abc import ABC, abstractmethod
 from os import makedirs, remove
 from os.path import exists, expanduser, isfile, join
+from functools import partial
 
+import aiohttp
+import asyncio
+
+from tempered.manager import RequestManager
 from tempered.limits import RandomizedDurationRateLimit, RateLimit
-from tempered.manager import DownloadManager
 
 
 def get_arguments() -> dict:
@@ -44,18 +48,33 @@ def get_arguments() -> dict:
 
     return parser.parse_args()
 
-class RiotMatchDownloader(DownloadManager):
+
+class RiotRequestManager(RequestManager):
+    @staticmethod
+    async def _handle_response(response: aiohttp.ClientResponse):
+        if response.status == 200:
+            # decode the body as json
+            return await response.json()
+        elif response.status == 429:
+            if 'Retry-After' in response.headers:
+                timeout = float(response.headers['Retry-After'])
+            else:
+                timeout = 10.0
+            print(f"response 429 limited for {timeout} seconds")
+            await asyncio.sleep(timeout)
+        elif response.status == 403:
+            raise RuntimeError("access key expired")
+        else:
+            raise RuntimeError(f"unhandled response: {response.status} - {response}")
+
+
+class LolMatchDownloader():
     def __init__(
             self,
-            rate_limits: [RateLimit],
-            seed_summoner_name: str,
-            api_key: str,
-            min_season: int,
+            headers_and_limits: (dict, (RateLimit,)),
             output_directory: str,
             region: str = 'euw1'):
-        self.seed_summoner_name = seed_summoner_name
-        self.api_key = api_key
-        self.min_season = min_season
+
         self.output_directory = output_directory
 
         if exists(self.output_directory):
@@ -64,80 +83,109 @@ class RiotMatchDownloader(DownloadManager):
         else:
             makedirs(self.output_directory)
 
-        self._headers = { "X-Riot-Token": self.api_key }
+        self._request_manager = RiotRequestManager(headers_and_limits)
+
         self._base_url = f"https://{region}.api.riotgames.com"
 
-        super().__init__(rate_limits)
+    def run(self, seed_summoner_names: [str]):
+        loop = asyncio.get_event_loop()
 
-    async def _prologue(self):
-        # print("_prologue()")
-        summoner_url = (f"{self._base_url}/lol/summoner/v4/summoners/by-name/"
-                        f"{self.seed_summoner_name}")
-        
-        summoner = await self.get_json(summoner_url, headers=self._headers)
+        loop.create_task(self.schedule_seed_summoners(seed_summoner_names))
 
-        await self._tasks.put(summoner['accountId'])
+        try:
+            loop.run_forever()
+        except Exception as exception:
+            print(f"error running loop: {exception}")
+            raise
 
-    async def _epilogue(self):
-        pass
+    async def schedule_seed_summoners(self, seed_summoner_names: [str]):
+        for summoner_name in seed_summoner_names:
+            summoner_url = (
+                f"{self._base_url}/lol/summoner/v4/summoners/by-name/"
+                f"{summoner_name}")
 
-    async def _handle_task(self, encryptedAccountId):
-        print(f"_handle_task({encryptedAccountId})")
-        begin_index = 0
+            await self._request_manager.schedule(
+                summoner_url, self.handle_summoner, priority=0)
 
-        while True:
+
+    async def handle_summoner(self, summoner):
+        matchlist_url = (
+            f"{self._base_url}/lol/match/v4/matchlists/by-account/"
+            f"{summoner['accountId']}?beginIndex=0"
+        )
+        self._request_manager.schedule(
+            matchlist_url,
+            partial(
+                self.handle_matchlist,
+                account_id=summoner['accountId']),
+            priority=2)
+
+    async def handle_matchlist(self, matchlist: dict, encrypted_account_id: str):
+        for match in matchlist['matches']:
+            match_details = None
+
+            out_path = join(self.output_directory, f"{match['gameId']}.json")
+            if exists(out_path):
+                with open(out_path, 'r') as in_file:
+                    try:
+                        match_details = json.load(in_file)
+                    except json.JSONDecodeError:
+                        remove(out_path)
+                        print(f"could not decode {out_path}, file deleted")
+
+            if match_details is None:
+                match_url = f"{self._base_url}/lol/match/v4/matches/{match['gameId']}"
+
+                self._request_manager.schedule(match_url, self.handle_match, priority=1)
+
+        if matchlist['endIndex'] == matchlist['totalGames']:
+            return
+
+        matchlist_url = (
+            f"{self._base_url}/lol/match/v4/matchlists/by-account/"
+            f"{encrypted_account_id}?beginIndex={matchlist['endIndex']}"
+        )
+        self._request_manager.schedule(
+            matchlist_url,
+            partial(
+                self.handle_matchlist,
+                account_id=encrypted_account_id),
+            priority=3)
+
+    async def handle_match(self, match_details: dict):
+        print(f"save {match_details['gameId']}.json")
+
+        out_path = join(self.output_directory, f"{match_details['gameId']}.json")
+        with open(out_path, 'w') as out_file:
+            json.dump(match_details, out_file)
+
+        for participant_identity in match_details['participantIdentities']:
+            encrypted_account_id = participant_identity['player']['currentAccountId']
             matchlist_url = (
                 f"{self._base_url}/lol/match/v4/matchlists/by-account/"
-                f"{encryptedAccountId}?season={self.min_season}&beginIndex={begin_index}"
+                f"{encrypted_account_id}?beginIndex=0"
             )
-            response = await self.get_json(matchlist_url, headers=self._headers)
+            self._request_manager.schedule(
+                matchlist_url,
+                partial(
+                    self.handle_matchlist,
+                    account_id=encrypted_account_id),
+                priority=2)
 
-            for match in response['matches']:
-
-                if match['season'] < self.min_season:
-                    return
-
-                match_details = None
-
-                out_path = join(self.output_directory, f"{match['gameId']}.json")
-                if exists(out_path):
-                    with open(out_path, 'r') as in_file:
-                        try:
-                            match_details = json.load(in_file)
-                        except json.JSONDecodeError as json_error:
-                            remove(out_path)
-                            print(f"could not decode {out_path}, file deleted")
-                
-                if match_details is None:
-                    match_url = f"{self._base_url}/lol/match/v4/matches/{match['gameId']}"
-                    match_details = await self.get_json(match_url, headers=self._headers)
-
-                    print(f"save {match['gameId']}.json")
-                    with open(out_path, 'w') as out_file:
-                        json.dump(match_details, out_file)
-
-                for participant_identity in match_details['participantIdentities']:
-                    await self._tasks.put(participant_identity['player']['currentAccountId'])
-
-            if begin_index == response['endIndex']:
-                return
-
-            begin_index = response['endIndex']
-                
 
 def main():
     args = get_arguments()
-    #  20 requests every 1 seconds
-    # 100 requests every 2 minutes
-    downloader = RiotMatchDownloader(
-        (RandomizedDurationRateLimit(1.0, 20), RandomizedDurationRateLimit(120.0, 100)),
-        args.seed_summoner_name,
-        args.api_key,
-        args.min_season,
-        args.output_directory)
 
-    downloader.start()
+    downloader = LolMatchDownloader(
+        (
+            {"X-Riot-Token": args.api_key},
+            (RandomizedDurationRateLimit(1.0, 20),
+             RandomizedDurationRateLimit(120.0, 100))
+        ),
+        args.output_directory
+    )
 
+    downloader.run()
 
 
 if __name__ == "__main__":
