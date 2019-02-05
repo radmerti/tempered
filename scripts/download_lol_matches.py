@@ -132,8 +132,6 @@ class LolMatchDownloader():
         if encrypted_account_id in self._scheduled_account_ids:
             return
 
-        print(f"scheduling {encrypted_account_id}")
-
         self._scheduled_account_ids[encrypted_account_id] = False
 
         matchlist_url = (
@@ -156,7 +154,7 @@ class LolMatchDownloader():
             priority=2)
 
     async def handle_matchlist(self, matchlist: dict, encrypted_account_id: str):
-        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} for {encrypted_account_id}: {matchlist}")
+        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} for {encrypted_account_id}")
 
         for match in matchlist['matches']:
             out_path = join(self.output_directory, f"{match['gameId']}.json")
