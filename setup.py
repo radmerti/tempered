@@ -12,7 +12,7 @@ def load_license() -> str:
 
 setup(
     name='tempered',
-    version='0.0.1',
+    version='0.0.2',
     description='Web API download manager with rate limiting',
     long_description=load_readme(),
     author='Tillmann Radmer',

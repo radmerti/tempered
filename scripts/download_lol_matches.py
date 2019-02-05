@@ -87,7 +87,7 @@ class LolMatchDownloader():
 
         self._base_url = f"https://{region}.api.riotgames.com"
 
-    def run(self, seed_summoner_names: [str]):
+    def run(self, seed_summoner_names: (str,)):
         loop = asyncio.get_event_loop()
 
         loop.create_task(self.schedule_seed_summoners(seed_summoner_names))
@@ -98,7 +98,7 @@ class LolMatchDownloader():
             print(f"error running loop: {exception}")
             raise
 
-    async def schedule_seed_summoners(self, seed_summoner_names: [str]):
+    async def schedule_seed_summoners(self, seed_summoner_names: (str,)):
         for summoner_name in seed_summoner_names:
             summoner_url = (
                 f"{self._base_url}/lol/summoner/v4/summoners/by-name/"
@@ -113,11 +113,11 @@ class LolMatchDownloader():
             f"{self._base_url}/lol/match/v4/matchlists/by-account/"
             f"{summoner['accountId']}?beginIndex=0"
         )
-        self._request_manager.schedule(
+        await self._request_manager.schedule(
             matchlist_url,
             partial(
                 self.handle_matchlist,
-                account_id=summoner['accountId']),
+                encrypted_account_id=summoner['accountId']),
             priority=2)
 
     async def handle_matchlist(self, matchlist: dict, encrypted_account_id: str):
@@ -136,7 +136,7 @@ class LolMatchDownloader():
             if match_details is None:
                 match_url = f"{self._base_url}/lol/match/v4/matches/{match['gameId']}"
 
-                self._request_manager.schedule(match_url, self.handle_match, priority=1)
+                await self._request_manager.schedule(match_url, self.handle_match, priority=1)
 
         if matchlist['endIndex'] == matchlist['totalGames']:
             return
@@ -145,11 +145,11 @@ class LolMatchDownloader():
             f"{self._base_url}/lol/match/v4/matchlists/by-account/"
             f"{encrypted_account_id}?beginIndex={matchlist['endIndex']}"
         )
-        self._request_manager.schedule(
+        await self._request_manager.schedule(
             matchlist_url,
             partial(
                 self.handle_matchlist,
-                account_id=encrypted_account_id),
+                encrypted_account_id=encrypted_account_id),
             priority=3)
 
     async def handle_match(self, match_details: dict):
@@ -165,11 +165,11 @@ class LolMatchDownloader():
                 f"{self._base_url}/lol/match/v4/matchlists/by-account/"
                 f"{encrypted_account_id}?beginIndex=0"
             )
-            self._request_manager.schedule(
+            await self._request_manager.schedule(
                 matchlist_url,
                 partial(
                     self.handle_matchlist,
-                    account_id=encrypted_account_id),
+                    encrypted_account_id=encrypted_account_id),
                 priority=2)
 
 
@@ -178,14 +178,16 @@ def main():
 
     downloader = LolMatchDownloader(
         (
-            {"X-Riot-Token": args.api_key},
-            (RandomizedDurationRateLimit(1.0, 20),
-             RandomizedDurationRateLimit(120.0, 100))
+            (
+                {"X-Riot-Token": args.api_key},
+                (RandomizedDurationRateLimit(1.0, 20),
+                 RandomizedDurationRateLimit(120.0, 100))
+            ),
         ),
         args.output_directory
     )
 
-    downloader.run()
+    downloader.run((args.seed_summoner_name,))
 
 
 if __name__ == "__main__":

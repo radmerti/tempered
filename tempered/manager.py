@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import asyncio
 import aiohttp
+from time import time
 
 from .limits import RateLimit
 
@@ -14,19 +15,15 @@ class RequestManager():
         for headers, limits in headers_and_limits:
             self._loop.create_task(self._request_handler(headers, limits))
 
-    def start(self):
-        pass
-
-
     async def schedule(
             self,
             url: str,
-            callback: asyncio.types.CoroutineType,
+            callback,  # : asyncio.types.CoroutineType,
             priority: int = 0):
         '''Schedule the `url` with the `priority`. The `callback`´
         will be called with `callback(self, result)`. The `result`
         is a `aiohttp.ClientResponse`.'''
-        await self._request_queue.put((priority, url, callback))
+        await self._request_queue.put((priority, time(), url, callback))
 
 
     async def _request_handler(self, headers: dict, limits: (RateLimit,)):
@@ -35,7 +32,7 @@ class RequestManager():
 
             while True:
                 # get a new request from the priority queue
-                _, url, callback = await self._request_queue.get()
+                _, _, url, callback = await self._request_queue.get()
 
                 response_body = None
                 while response_body is None:
@@ -51,7 +48,7 @@ class RequestManager():
                     *(limit() for limit in limits),
                     loop=self._loop)
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     async def _handle_response(response: aiohttp.ClientResponse):
         pass
