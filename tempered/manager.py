@@ -13,7 +13,7 @@ class InternalServerError(Exception):
 
 
 class RequestManager():
-    def __init__(self, headers_and_limits: (dict, (RateLimit,)), max_requests_inflight: int = 0):
+    def __init__(self, headers_and_limits: ((dict, (RateLimit,)),), max_requests_inflight: int = 0):
 
         self.max_requests_inflight = max_requests_inflight
 
@@ -40,6 +40,9 @@ class RequestManager():
 
     async def _request_handler(self, headers: dict, limits: (RateLimit,)):
 
+        print(f"_request_handler: headers={headers}")
+        print(f"_request_handler: limits={limits}")
+
         async with aiohttp.ClientSession(headers=headers) as session:
 
             while True:
@@ -56,7 +59,7 @@ class RequestManager():
                 response_body = None
                 while response_body is None:
                     try:
-                        async with session.get(url, headers=headers) as response:
+                        async with session.get(url) as response:
                             response_body = await self._handle_response(response)
                     except aiohttp.ClientOSError as os_error:
                         print('ClientOSError - trying again in a few seconds')

@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from os import makedirs, remove
 from os.path import exists, expanduser, isfile, join
 from functools import partial
+from json import load
 
 import aiohttp
 import asyncio
@@ -23,9 +24,10 @@ def get_arguments() -> dict:
         type=str)
 
     parser.add_argument(
-        "api_key",
+        "--riot_keys_and_limits_file",
         help="API key used for authenticating the requests in the X-Riot-Token header field.",
-        type=str)
+        type=str,
+        default=join('.', 'riot_keys_and_limits.json'))
 
     parser.add_argument(
         "--min_season",
@@ -78,7 +80,7 @@ async def wakeup_loop(every: float):
 class LolMatchDownloader():
     def __init__(
             self,
-            headers_and_limits: (dict, (RateLimit,)),
+            headers_and_limits: ((dict, (RateLimit,)),),
             output_directory: str,
             region: str = 'euw1',
             lol_seasons: (int,)=(10, 11),
@@ -113,6 +115,7 @@ class LolMatchDownloader():
 
     async def schedule_seed_summoners(self, seed_summoner_names: (str,)):
         for summoner_name in seed_summoner_names:
+            print(f"seeding with {summoner_name}")
             summoner_url = (
                 f"{self._base_url}/lol/summoner/v4/summoners/by-name/"
                 f"{summoner_name}")
@@ -128,6 +131,8 @@ class LolMatchDownloader():
 
         if encrypted_account_id in self._scheduled_account_ids:
             return
+
+        print(f"scheduling {encrypted_account_id}")
 
         self._scheduled_account_ids[encrypted_account_id] = False
 
@@ -151,7 +156,7 @@ class LolMatchDownloader():
             priority=2)
 
     async def handle_matchlist(self, matchlist: dict, encrypted_account_id: str):
-        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} for {encrypted_account_id}")
+        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} for {encrypted_account_id}: {matchlist}")
 
         for match in matchlist['matches']:
             out_path = join(self.output_directory, f"{match['gameId']}.json")
@@ -196,13 +201,19 @@ class LolMatchDownloader():
 def main():
     args = get_arguments()
 
+    with open(args.riot_keys_and_limits_file, 'r') as key_file:
+        riot_keys_and_limits = load(key_file)
+
     downloader = LolMatchDownloader(
-        (
+        tuple(
             (
-                {"X-Riot-Token": args.api_key},
-                (RandomizedDurationRateLimit(1.0, 20),
-                 RandomizedDurationRateLimit(120.0, 100))
-            ),
+                {"X-Riot-Token": key},
+                tuple(
+                    RandomizedDurationRateLimit(seconds, count)
+                    for seconds, count in limits
+                )
+            )
+            for key, limits in riot_keys_and_limits
         ),
         args.output_directory
     )
