@@ -7,7 +7,7 @@ from functools import partial
 import aiohttp
 import asyncio
 
-from tempered.manager import RequestManager
+from tempered.manager import RequestManager, KeyExpiredError, InternalServerError
 from tempered.limits import RandomizedDurationRateLimit, RateLimit
 
 
@@ -63,9 +63,16 @@ class RiotRequestManager(RequestManager):
             print(f"response 429 limited for {timeout} seconds")
             await asyncio.sleep(timeout)
         elif response.status == 403:
-            raise RuntimeError("access key expired")
+            raise KeyExpiredError("status 403 - access key expired")
+        elif response.status == 500:
+            return None  # try again
         else:
             raise RuntimeError(f"unhandled response: {response.status} - {response}")
+
+
+async def wakeup_loop(every: float):
+    while True:
+        await asyncio.sleep(every)
 
 
 class LolMatchDownloader():
@@ -73,9 +80,13 @@ class LolMatchDownloader():
             self,
             headers_and_limits: (dict, (RateLimit,)),
             output_directory: str,
-            region: str = 'euw1'):
+            region: str = 'euw1',
+            lol_seasons: (int,)=(10, 11),
+            lol_queues: (int,)=(420, 440)):
 
         self.output_directory = output_directory
+        self.lol_seasons = lol_seasons
+        self.lol_queues = lol_queues
 
         if exists(self.output_directory):
             if isfile(self.output_directory):
@@ -87,16 +98,18 @@ class LolMatchDownloader():
 
         self._base_url = f"https://{region}.api.riotgames.com"
 
+        self._scheduled_account_ids = {}
+
     def run(self, seed_summoner_names: (str,)):
         loop = asyncio.get_event_loop()
 
         loop.create_task(self.schedule_seed_summoners(seed_summoner_names))
 
         try:
-            loop.run_forever()
-        except Exception as exception:
-            print(f"error running loop: {exception}")
-            raise
+            tasks = (wakeup_loop(1.0),)+self._request_manager.tasks
+            loop.run_until_complete(asyncio.gather(*tasks, loop=loop))
+        except KeyboardInterrupt:
+            print("CTRL-C")
 
     async def schedule_seed_summoners(self, seed_summoner_names: (str,)):
         for summoner_name in seed_summoner_names:
@@ -107,23 +120,40 @@ class LolMatchDownloader():
             await self._request_manager.schedule(
                 summoner_url, self.handle_summoner, priority=0)
 
+    async def schedule_matchlist(
+            self,
+            encrypted_account_id: str,
+            begin_index: int = 0,
+            priority: int = 0):
 
-    async def handle_summoner(self, summoner):
+        if encrypted_account_id in self._scheduled_account_ids:
+            return
+
+        self._scheduled_account_ids[encrypted_account_id] = False
+
         matchlist_url = (
             f"{self._base_url}/lol/match/v4/matchlists/by-account/"
-            f"{summoner['accountId']}?beginIndex=0"
+            f"{encrypted_account_id}?beginIndex={begin_index}"
+            f"{''.join('&queue={}'.format(q) for q in self.lol_queues)}"
+            f"{''.join('&season={}'.format(s) for s in self.lol_seasons)}"
         )
         await self._request_manager.schedule(
             matchlist_url,
             partial(
                 self.handle_matchlist,
-                encrypted_account_id=summoner['accountId']),
+                encrypted_account_id=encrypted_account_id),
+            priority=priority)
+
+    async def handle_summoner(self, summoner):
+        await self.schedule_matchlist(
+            summoner['accountId'],
+            begin_index=0,
             priority=2)
 
     async def handle_matchlist(self, matchlist: dict, encrypted_account_id: str):
-        for match in matchlist['matches']:
-            match_details = None
+        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} for {encrypted_account_id}")
 
+        for match in matchlist['matches']:
             out_path = join(self.output_directory, f"{match['gameId']}.json")
             if exists(out_path):
                 with open(out_path, 'r') as in_file:
@@ -132,25 +162,18 @@ class LolMatchDownloader():
                     except json.JSONDecodeError:
                         remove(out_path)
                         print(f"could not decode {out_path}, file deleted")
-
-            if match_details is None:
+                await self.enqueue_match_participants(match_details)
+            else:
                 match_url = f"{self._base_url}/lol/match/v4/matches/{match['gameId']}"
-
                 await self._request_manager.schedule(match_url, self.handle_match, priority=1)
 
         if matchlist['endIndex'] == matchlist['totalGames']:
             return
 
-        matchlist_url = (
-            f"{self._base_url}/lol/match/v4/matchlists/by-account/"
-            f"{encrypted_account_id}?beginIndex={matchlist['endIndex']}"
-        )
-        await self._request_manager.schedule(
-            matchlist_url,
-            partial(
-                self.handle_matchlist,
-                encrypted_account_id=encrypted_account_id),
-            priority=3)
+        # await self.schedule_matchlist(
+        #     encrypted_account_id,
+        #     begin_index=matchlist['endIndex'],
+        #     priority=3)
 
     async def handle_match(self, match_details: dict):
         print(f"save {match_details['gameId']}.json")
@@ -159,19 +182,16 @@ class LolMatchDownloader():
         with open(out_path, 'w') as out_file:
             json.dump(match_details, out_file)
 
+        await self.enqueue_match_participants(match_details)
+
+    async def enqueue_match_participants(self, match_details: dict):
         for participant_identity in match_details['participantIdentities']:
             encrypted_account_id = participant_identity['player']['currentAccountId']
-            matchlist_url = (
-                f"{self._base_url}/lol/match/v4/matchlists/by-account/"
-                f"{encrypted_account_id}?beginIndex=0"
-            )
-            await self._request_manager.schedule(
-                matchlist_url,
-                partial(
-                    self.handle_matchlist,
-                    encrypted_account_id=encrypted_account_id),
-                priority=2)
 
+            await self.schedule_matchlist(
+                encrypted_account_id,
+                begin_index=0,
+                priority=2)
 
 def main():
     args = get_arguments()
