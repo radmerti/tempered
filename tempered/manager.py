@@ -5,10 +5,10 @@ from time import time
 
 from .limits import RateLimit
 
-class KeyExpiredError(Exception):
+class FatalRequestError(Exception):
     pass
 
-class InternalServerError(Exception):
+class CancelRequestError(Exception):
     pass
 
 
@@ -60,10 +60,18 @@ class RequestManager():
                 while response_body is None:
                     try:
                         async with session.get(url) as response:
-                            response_body = await self._handle_response(response)
+                            try:
+                                response_body = await self._handle_response(response)
+                            except FatalRequestError:
+                                raise
+                            except CancelRequestError:
+                                break
                     except aiohttp.ClientOSError as os_error:
                         print('ClientOSError - trying again in a few seconds')
                         await asyncio.sleep(10.0)
+
+                if response_body is None:
+                    continue
 
                 # schedule the callback but don't await the reuslt
                 self._loop.create_task(callback(response_body))

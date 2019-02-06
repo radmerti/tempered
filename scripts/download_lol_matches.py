@@ -8,7 +8,7 @@ from json import load
 import aiohttp
 import asyncio
 
-from tempered.manager import RequestManager, KeyExpiredError, InternalServerError
+from tempered.manager import RequestManager, FatalRequestError, CancelRequestError
 from tempered.limits import RandomizedDurationRateLimit, RateLimit
 
 
@@ -52,11 +52,23 @@ def get_arguments() -> dict:
 
 
 class RiotRequestManager(RequestManager):
+    try_again = (500, 502, 503, 504)
+    abort_request = (404, 405, 415)
+    raise_error = (400, 401, 403)
+
     @staticmethod
     async def _handle_response(response: aiohttp.ClientResponse):
+        json_body = None
+
+        try:
+            json_body = await response.json()
+        except Exception:
+            pass
+
         if response.status == 200:
             # decode the body as json
-            return await response.json()
+            return json_body
+
         elif response.status == 429:
             if 'Retry-After' in response.headers:
                 timeout = float(response.headers['Retry-After'])
@@ -64,10 +76,16 @@ class RiotRequestManager(RequestManager):
                 timeout = 10.0
             print(f"response 429 limited for {timeout} seconds")
             await asyncio.sleep(timeout)
-        elif response.status == 403:
-            raise KeyExpiredError("status 403 - access key expired")
-        elif response.status == 500:
+
+        elif response.status in self.raise_error:
+            raise FatalRequestError(f"request error - status {response.status} - {json_body}")
+
+        elif response.status in self.try_again:
             return None  # try again
+
+        elif response.status in self.abort_request:
+            raise CancelRequestError(f"request cancelled - status {response.status} - {json_body}")
+
         else:
             raise RuntimeError(f"unhandled response: {response.status} - {response}")
 
