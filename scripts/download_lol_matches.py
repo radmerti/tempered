@@ -19,18 +19,13 @@ def get_arguments() -> dict:
         description='Process some integers.')
 
     parser.add_argument(
-        "seed_summoner_name",
-        help="Summoner name of some user that is used to seed the search for matches.",
-        type=str)
-
-    parser.add_argument(
-        "--riot_keys_and_limits_file",
+        "-c", "--config",
         help="API key used for authenticating the requests in the X-Riot-Token header field.",
         type=str,
-        default=join('.', 'riot_keys_and_limits.json'))
+        default=join('.', 'config.json'))
 
     parser.add_argument(
-        "--min_season",
+        "-s", "--min_season",
         help="Matches older than this season are not downloaded.",
         type=int,
         default=11)
@@ -43,7 +38,7 @@ def get_arguments() -> dict:
         default=join(expanduser('~'), 'Downloads', 'lol_matches'))
 
     parser.add_argument(
-        "--region",
+        "-r", "--region",
         help="League of legends region. For exmaple 'euw1'. Defaults to 'euw1'.",
         type=str,
         default='euw1')
@@ -56,8 +51,7 @@ class RiotRequestManager(RequestManager):
     abort_request = (404, 405, 415)
     raise_error = (400, 401, 403)
 
-    @staticmethod
-    async def _handle_response(response: aiohttp.ClientResponse):
+    async def _handle_response(self, response: aiohttp.ClientResponse):
         json_body = None
 
         try:
@@ -96,6 +90,15 @@ async def wakeup_loop(every: float):
 
 
 class LolMatchDownloader():
+    '''
+    0. matches
+    1. seed match lists (0-100)
+    2. seed summoners
+    3. masterleagues
+    4. match lists (0-100)
+    5. match lists (100+)
+    '''
+
     def __init__(
             self,
             headers_and_limits: ((dict, (RateLimit,)),),
@@ -124,6 +127,7 @@ class LolMatchDownloader():
         loop = asyncio.get_event_loop()
 
         loop.create_task(self.schedule_seed_summoners(seed_summoner_names))
+        loop.create_task(self.schedule_masterleagues())
 
         try:
             tasks = (wakeup_loop(1.0),)+self._request_manager.tasks
@@ -139,13 +143,30 @@ class LolMatchDownloader():
                 f"{summoner_name}")
 
             await self._request_manager.schedule(
-                summoner_url, self.handle_summoner, priority=0)
+                summoner_url, self.handle_summoner, priority=2)
+
+    async def schedule_masterleagues(
+            self,
+            queues: (str,) = ('RANKED_FLEX_SR', 'RANKED_SOLO_5x5')):
+        for queue in queues:
+
+            print(f"finding seeds from {queue}")
+
+            masterleagues_url = (
+                f"{self._base_url}/lol/league/v4/masterleagues/by-queue/{queue}"
+            )
+
+            await self._request_manager.schedule(
+                masterleagues_url,
+                self.handle_masterleagues,
+                priority=3
+            )
 
     async def schedule_matchlist(
             self,
             encrypted_account_id: str,
             begin_index: int = 0,
-            priority: int = 0):
+            priority: int = 4):
 
         if encrypted_account_id in self._scheduled_account_ids:
             return
@@ -169,10 +190,17 @@ class LolMatchDownloader():
         await self.schedule_matchlist(
             summoner['accountId'],
             begin_index=0,
-            priority=2)
+            priority=1)
+
+    async def handle_masterleagues(self, leaguelist: dict):
+        await self.schedule_seed_summoners(
+            entry['summonerName']
+            for entry in leaguelist['entries']
+        )
 
     async def handle_matchlist(self, matchlist: dict, encrypted_account_id: str):
-        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} for {encrypted_account_id}")
+        print(f"got matches {matchlist['startIndex']} to {matchlist['endIndex']} "
+              f"for {encrypted_account_id}")
 
         for match in matchlist['matches']:
             out_path = join(self.output_directory, f"{match['gameId']}.json")
@@ -186,7 +214,7 @@ class LolMatchDownloader():
                 await self.enqueue_match_participants(match_details)
             else:
                 match_url = f"{self._base_url}/lol/match/v4/matches/{match['gameId']}"
-                await self._request_manager.schedule(match_url, self.handle_match, priority=1)
+                await self._request_manager.schedule(match_url, self.handle_match, priority=0)
 
         if matchlist['endIndex'] == matchlist['totalGames']:
             return
@@ -194,7 +222,7 @@ class LolMatchDownloader():
         # await self.schedule_matchlist(
         #     encrypted_account_id,
         #     begin_index=matchlist['endIndex'],
-        #     priority=3)
+        #     priority=5)
 
     async def handle_match(self, match_details: dict):
         print(f"save {match_details['gameId']}.json")
@@ -212,13 +240,13 @@ class LolMatchDownloader():
             await self.schedule_matchlist(
                 encrypted_account_id,
                 begin_index=0,
-                priority=2)
+                priority=4)
 
 def main():
     args = get_arguments()
 
-    with open(args.riot_keys_and_limits_file, 'r') as key_file:
-        riot_keys_and_limits = load(key_file)
+    with open(args.config, 'r') as key_file:
+        config = load(key_file)
 
     downloader = LolMatchDownloader(
         tuple(
@@ -229,12 +257,12 @@ def main():
                     for seconds, count in limits
                 )
             )
-            for key, limits in riot_keys_and_limits
+            for key, limits in config['keys_and_limits']
         ),
         args.output_directory
     )
 
-    downloader.run((args.seed_summoner_name,))
+    downloader.run(config['seed_summoners'])
 
 
 if __name__ == "__main__":
