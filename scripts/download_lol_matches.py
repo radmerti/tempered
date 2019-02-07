@@ -175,7 +175,7 @@ class LolMatchDownloader():
 
         matchlist_url = (
             f"{self._base_url}/lol/match/v4/matchlists/by-account/"
-            f"{encrypted_account_id}?beginIndex={begin_index}"
+            f"{encrypted_account_id}?beginIndex={begin_index}&endIndex={begin_index+20}"
             f"{''.join('&queue={}'.format(q) for q in self.lol_queues)}"
             f"{''.join('&season={}'.format(s) for s in self.lol_seasons)}"
         )
